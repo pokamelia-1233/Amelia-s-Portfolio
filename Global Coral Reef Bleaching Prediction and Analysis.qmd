@@ -1,0 +1,584 @@
+---
+title: "Global Coral Reef Bleaching Prediction and Analysis"
+subtitle: "Amelia Pok"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+execute: 
+  warning: false
+  message: false 
+editor: visual
+---
+
+```{r results = "hide", message = FALSE, warning = FALSE}
+
+library(tidyverse)
+library(cvTools)
+library(randomForest)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(corrr)
+library(e1071)
+library(patchwork)
+library(leaflet)
+library(caret)
+library(pROC)
+library(knitr)
+library(scales)
+reef = read_csv("C:/Users/Ame PC/Desktop/3rd year 1st sem/DATA 3888/Data/disciplinary assignment/Reef_Check_with_cortad_variables_with_annual_rate_of_SST_change.csv") 
+
+glimpse(reef)
+str(reef)
+```
+
+# Part 1 - Exploratory Analysis
+
+```{r message = FALSE, warning = FALSE}
+total_er <- round(proportions(table(reef$Errors.))*100, 2)
+
+data.frame(Status = c("Clean", "Errors"), Count = c(sum(reef$Errors.== FALSE), sum(reef$Errors.== TRUE)), Percentage = c(unname(total_er["FALSE"]), unname(total_er["TRUE"]))) %>% 
+  kable(caption = "Errors in Data", col.names = c("Status", "Count", "Percentage"))
+```
+
+EDA involves removing incorrect data (Garcia et.al, 2015). Hence, justifies the step to remove errors.
+
+```{r message = FALSE, warning = FALSE}
+#NA table
+colSums(is.na(reef)) %>%
+  sort(decreasing = TRUE) %>%
+  as.data.frame() %>%
+  setNames("Missing_Values") %>%
+  filter(Missing_Values > 0) %>%
+  mutate(Percentage = round(Missing_Values / nrow(reef) *100, 2)) %>%
+  kable(caption = "Missing Values in the Data by Variables", col.names = c("Missing Values", "Percentage of NA over total Data"))
+
+sum(is.na(reef))
+sum(!is.na(reef))
+```
+
+5% of data missing in each numerical variable. Missing values were later removed. If missing values are less than or equal to 5%, removing won’t result in over-fitting (Shri, 2024).
+
+Values higher than 0.05% won’t be removed because they are descriptive data and won’t be used other than Ocean and Region.
+
+```{r message = FALSE, warning = FALSE}
+#ocean error table 
+ocean_error <- reef %>%
+  group_by(Ocean) %>%
+  summarise(
+    Total = n(),
+    Errors = sum(Errors. == TRUE),
+    Clean = sum(Errors. == FALSE),
+    Error_R = round(Errors / Total * 100, 1)
+  ) %>%
+  arrange(desc(Error_R))
+
+# Percentage of error each ocean contributes
+ocean_error <- ocean_error %>%
+  mutate(Total_Error_percent = round(Errors / sum(Errors) * 100, 1))
+
+ocean_error%>%
+  kable(caption = "Error Rate by Ocean", col.names = c("Ocean", "Total", "Errors", "Clean", "Error Rate %", "Percentage of Total Errors")
+  )
+```
+
+Errors are not randomly distributed, removing errors could lead to an under-representation of data.
+
+```{r message = FALSE, warning = FALSE}
+#error rate by year table 
+year_error <- reef %>%
+  group_by(Year) %>%
+  summarise(
+    Total = n(),
+    Errors = sum(Errors. == TRUE),
+    Clean = sum(Errors. == FALSE),
+    Error_R= round(Errors / Total * 100, 1)
+  ) %>%
+  arrange(Year)
+
+year_error %>%
+  kable(caption = "Error Rate by Year", col.names = c("Year", "Total", "Errors", "Clean", "Error Rate %")
+  )
+```
+
+```{r results = "hide", message = FALSE, warning = FALSE}
+#Last pre-processing check before correlation 
+reef_clean1 <- reef %>%
+  filter(Errors. == FALSE) %>%
+  select(-What.errors., -Errors.)
+
+#check for na values again after removing errors: 
+round(colSums(is.na(reef_clean1)) / nrow(reef_clean1) *100,2) %>% 
+  sort(decreasing = TRUE)
+```
+
+```{r message = FALSE, warning = FALSE}
+#Filter data from 2014-2017 
+reef_clean1 <- reef_clean1 %>%
+  mutate(Date = as.Date(Date, format = "%d-%b-%y")) %>%
+  filter(Date >= as.Date("2014-01-01"), Date <= as.Date("2017-12-31")) 
+
+reef_clean1$Log_bleaching <- log1p(reef_clean1$Average_bleaching)
+
+#table to check assumption
+data.frame(Variable = c("Average Bleaching", "Log Bleaching"), Skewness = round(c(skewness(reef_clean1$Average_bleaching, na.rm = TRUE), skewness(reef_clean1$Log_bleaching, na.rm = TRUE)), 2)) %>% 
+             kable(caption = "Check for Skewness after Log Transformation")
+
+ spearman_vars <- reef_clean1 %>% 
+  select(where(is.numeric)) %>% 
+  select(-S1, -S2, -S3, -S4, -Log_bleaching, -SSTA_Mean) %>%
+  colnames()
+ 
+#remove ssta_mean because there's no variance in the data, along with S1-S4: contributes to Average_bleaching
+
+spearman_cor <- reef_clean1 %>%
+  select(all_of(spearman_vars)) %>%
+  correlate(use = "complete.obs", method = "spearman") %>%
+  focus(Average_bleaching) %>% 
+  arrange(desc(abs(Average_bleaching))) %>%
+  rename(Numeric_Variable = term)
+
+spearman_cor <- spearman_cor %>%
+  mutate(
+    rank = rank(-abs(Average_bleaching), ties.method = "first"), 
+    label = paste0("#", rank, " ", Numeric_Variable), 
+    top4 = rank <= 4
+  )
+
+#spearman correlation table 
+spearman_cor %>%
+  select(Numeric_Variable, Average_bleaching) %>%
+  kable(caption = "Spearman Correlation with Average Bleaching", col.names = c("Variable", "Correlation"), digits = 2)
+
+
+```
+
+Log transformed ( average bleaching) to meet the assumption of Pearson's Correlation: Normality. However after transforming, the skewness is still higher than 1 which is unsymmetrical (Navarro, 2022).
+
+Spearman's Correlation (non-parametric) Assumptions:
+
+1.  Independence: passed as each observation is at a different location or time as seen in the data
+2.  Variables must be continuous: passed
+3.  Monotonic Relationships: passed, variables affects each other
+
+```{r results = "hide", message = FALSE, warning = FALSE, fig.width= 14, fig.height = 10, fig-bar, fig.cap = "Horizontal Bar Chart: Order of Variables Correlated to Average Bleaching"}
+#bar chart: Spearman Correlation 
+ggplot(spearman_cor, aes(x = reorder(label, Average_bleaching),
+                       y = Average_bleaching,
+                       fill = Average_bleaching > 0,
+                       alpha = top4)) +
+  geom_hline(yintercept = 0, linewidth = 0.4, colour = "grey50") +
+  geom_col() +
+  geom_text(aes(label = round(Average_bleaching, 3),
+                hjust = ifelse(Average_bleaching > 0, -0.15, 1.15)),
+            size = 2.8, colour = "grey50") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "#378ADD", "FALSE" = "#D85A30"), guide = "none") +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.65), guide = "none") +
+  labs(x = NULL, y = "Average Bleaching Correlation",
+       title = "Correlation of Numeric Variables with Coral Bleaching from 2014-2017") +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+cat_var_check <- data.frame(
+  Variable = c("Ocean", "Region", "Country", "State.Province.Island", 
+               "City.Town", "Organism.Code", "Reef.ID", "Reef.Name"),
+  
+  Number_Groups = c(
+    n_distinct(reef_clean1$Ocean),
+    n_distinct(reef_clean1$Region),
+    n_distinct(reef_clean1$Country),
+    n_distinct(reef_clean1$State.Province.Island),
+    n_distinct(reef_clean1$City.Town),
+    n_distinct(reef_clean1$Organism.Code),
+    n_distinct(reef_clean1$Reef.ID),
+    n_distinct(reef_clean1$Reef.Name)
+  ))
+
+cat_var_check %>%
+  select(Variable, Number_Groups) %>%
+  kable(caption = "Categorical Variables Selection for Test",
+        col.names = c("Variable", "Number of Groups"))
+
+
+```
+
+```{r results = "hide", message = FALSE, warning = FALSE, fig.width = 16, fig.height = 18, fig-box, fig.cap = "Boxplot: Comparing Average Bleaching accross Ocean and Region"}
+#Box Plot: Categorical Variables
+
+#create different levels (factor)
+reef_clean1$Ocean <- factor(reef_clean1$Ocean, 
+                             levels = c("Arabian Gulf", "Atlantic", 
+                                        "Indian", "Pacific", "Red Sea"))
+
+#top 5 regions because the group is too big
+top5 <- reef_clean1 %>%
+  filter(!is.na(Region)) %>%
+  group_by(Region) %>%
+  summarise(median_bleaching = median(Average_bleaching, na.rm = TRUE)) %>%
+  slice_max(median_bleaching, n = 5, with_ties = FALSE) %>%
+  pull(Region)
+
+# assign each region to the most common ocean
+region_ocean <- reef_clean1 %>%
+  filter(!is.na(Ocean), Region %in% top5) %>%
+  group_by(Region) %>%
+  summarise(Ocean = names(which.max(table(Ocean)))) %>%
+  mutate(Ocean = factor(Ocean, levels = c("Arabian Gulf", "Atlantic", 
+                                           "Indian", "Pacific", "Red Sea")))
+
+
+plot2_data <- reef_clean1 %>%
+  filter(!is.na(Ocean)) %>%
+  filter(Region %in% top5) %>%
+  select(-Ocean) %>%
+  left_join(region_ocean, by = "Region")
+
+
+plot1 <- reef_clean1 %>%
+  filter(!is.na(Ocean)) %>%
+  ggplot(aes(x = reorder(Ocean, Average_bleaching, median), 
+             y = Average_bleaching, fill = Ocean)) + 
+  geom_boxplot() +
+  labs(title = "Distribution by Ocean", 
+       x = "Types of Ocean", 
+       y = "Average Bleaching") +
+  theme_minimal(base_size = 14) 
+
+
+plot2 <- plot2_data %>%
+  ggplot(aes(x = reorder(Region, Average_bleaching, median), 
+             y = Average_bleaching, fill = Ocean)) + 
+  geom_boxplot(outlier.size = 0.5, show.legend = FALSE) +
+  labs(title = "Distribution by Region (top 5)", 
+       x = "Types of Region", 
+       y = "Average Bleaching") +
+  theme_minimal(base_size = 14) 
+
+plot1 + plot2 +
+  plot_annotation(
+    title = "Average Bleaching by Categorical Geographic Variables",
+    theme = theme(plot.title = element_text(size = 16))
+  ) +
+  plot_layout(guides = "collect") &
+  scale_fill_brewer(palette = "Set1", drop = FALSE)
+```
+
+@fig-box shows that the Pacific Ocean and regions like ERG050 are higher in bleaching. This means bleaching could be geographically concentrated, and is influenced by various factors beyond numerical variables.
+
+Could still be data quality issues: ER035 belongs to 2 oceans, it could also be large enough to cover 2 oceans.
+
+# Part 2 - Visualisation
+
+```{r results = "hide", message = FALSE, warning = FALSE}
+#Check for missing data (Long, Lat)
+reef_clean1 %>%
+  count(is.na(Latitude.Degrees), is.na(Longitude.Degrees))
+```
+
+```{r message = FALSE, warning = FALSE, fig-visual, fig.cap = "Interactive Map: Showing Average Proportion of Coral Bleaching from 2014-2017"}
+#Coral Bleaching Map 
+reef_map1 <- reef_clean1 %>%
+  group_by(Reef.Name, State.Province.Island, Longitude.Degrees, Latitude.Degrees) %>% 
+  summarise( 
+    Avg_bleaching = mean(Average_bleaching, na.rm = TRUE), 
+    Avg_temperature_mean = mean(Temperature_Mean, na.rm = TRUE),
+    Avg_TSA_freq = mean(TSA_Frequency, na.rm = TRUE), 
+    Avg_temperature_kelvin_sd = mean(Temperature_Kelvin_Standard_Deviation, na.rm = TRUE), 
+    Avg_TSA_DHW_SD = mean(TSA_DHW_Standard_Deviation, na.rm = TRUE), .groups = "drop")
+  
+  
+colour <- colorNumeric(palette = "Spectral", reverse = TRUE, domain = reef_map1$Avg_bleaching)
+
+leaflet(reef_map1) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~ Longitude.Degrees,
+    lat = ~ Latitude.Degrees,
+    color = ~ colour(Avg_bleaching),
+    fillOpacity = 0.5,
+    radius = ~rescale(Avg_bleaching, to = c(5, 20)),
+    popup = ~paste("<b>Reef:</b>", Reef.Name, "<br>", 
+                   "<b>State Province Island:</b>", State.Province.Island, "<br>", 
+                   "<b>Average Bleaching:</b>", round(Avg_bleaching, 1), "<br>", 
+                   "<b>Temperature Mean:</b>", round(Avg_temperature_mean, 1), "<br>",
+                   "<b>TSA Frequency:</b>", round(Avg_TSA_freq, 1), "<br>", 
+                   "<b>Temperature Kelvin Standard Deviation:</b>", round(Avg_temperature_kelvin_sd, 1), "<br>", 
+                   "<b>TSA DHW Standard Deviation:</b>", round(Avg_TSA_DHW_SD, 1), "<br>")) %>%
+  addLegend( position = "bottomleft", pal = colour, values = ~Avg_bleaching, title = "Average Bleaching", 
+  ) 
+
+  
+
+```
+
+To visualise the effects of coral bleaching in the data from 2014 to 2017, I used an interactive map of coral bleaching sites across the world because it is spatial data. Furthermore, it is more interpretable to use this visualisation because it shows bleach occurring at specific reef locations and more.
+
+The interactive package used: Leaflet, allows the user on this report to zoom in and out on specific coral bleaching. This interactive aspect of the graph is essential in terms of viewing in detail multiple bleached coral regions in the world. This along with the continuous colour scale of the average bleaching in the graph increases the interpretability where users can quickly detect the presence of bleaching. Lastly, the circle markers are related to the size of the average bleaching amount.
+
+The Coral bleaching pattern seems to be largely concentrated near South East Asia regions, South America regions, and North America. The coral bleaching does not seem to be equally distributed and instead seems to be heavily concentrated in certain regions and oceans. Moreover, most of the data in this period of time seem to be close to 0 in terms of average bleaching.
+
+# Part 3 - Model Building
+
+```{r message = FALSE, warning = FALSE}
+#create new cleaned data set and assumptions checking
+
+reef_model <- reef %>% 
+  filter(Errors. == FALSE) %>%
+  select(-What.errors., -Errors., -SSTA_Mean) %>%
+  mutate( 
+    Date = as.Date(Date, format = "%d-%b-%y"), 
+    Cat_bleaching = case_when(
+      Average_bleaching == 0 ~ "None", 
+      Average_bleaching > 0 ~ "Present"
+    ), 
+    Cat_bleaching = as.factor(Cat_bleaching)) %>%
+  select(Cat_bleaching, Temperature_Mean, TSA_Frequency, Temperature_Kelvin_Standard_Deviation, TSA_DHW_Standard_Deviation, TSA, Temperature_Kelvin, TSA_DHW, Latitude.Degrees, Longitude.Degrees, Reef.Name, State.Province.Island) %>% 
+  na.omit()
+  
+n<- nrow(reef_model)
+
+data.frame(To_Check = c("Number of total observations", "Number of predictors"), Result = c(nrow(reef_model), 4)) %>% 
+  kable(caption = "Assumption 1: Sample Size")
+
+data.frame(Class = names(table(reef_model$Cat_bleaching)), Count = as.numeric(table(reef_model$Cat_bleaching)), Percentage = as.numeric(round(proportions(table(reef_model$Cat_bleaching)) * 100, 2))) %>%
+  kable(caption = "Assumption 2: Class Balance of Data to Presence of Bleaching", col.names = c("Class of Bleaching", "Count", "Percentage"))
+
+```
+
+Assumptions of Random Forest Model:
+
+1.  Independence of Observation: passed as explained in EDA
+
+2.  Sample size large enough: passed with number of observations being larger than the number of predictors.
+
+3.  Classes are balanced: passed, although classes are slightly imbalanced, with k-fold cross validation and splitting into train/test mitigates this issue.
+
+```{r results = "hide", message = FALSE, warning = FALSE, fig-boxplots, fig.cap = "Boxplot: Comparing Model Performance with 50 Repeats of 5 Fold Cross Validation"}
+#k fold-cv 
+
+set.seed(123)
+
+k <- 5 
+n_repeat <- 50 
+cv_f_50 <- c()
+cv_a_50 <- c()
+
+for (i in 1:n_repeat) {
+  if (i%%10 == 0) { print(i)}
+  cv_f <- c()
+  cv_a <- c()
+  cvSets = cvTools::cvFolds(n, k)
+
+  for (j in 1:k) {
+    test_id <-  cvSets$subsets[cvSets$which == j]
+    train_df <- reef_model[-test_id, ]
+    test_df <- reef_model[test_id, ]
+  
+#farhan's model 
+    rf_model <- randomForest(Cat_bleaching ~ Temperature_Mean + TSA_Frequency + Temperature_Kelvin_Standard_Deviation + TSA_DHW_Standard_Deviation, data = train_df, na.action = na.omit, ntree = 100)
+
+predict_f <- predict(rf_model, newdata = test_df) 
+
+cv_f[j] <- mean(predict_f == test_df$Cat_bleaching)
+
+#Alt model 
+rf_model_a <- randomForest(
+  Cat_bleaching   ~ TSA + Temperature_Kelvin + TSA_DHW + Latitude.Degrees, data = train_df, na.action = na.omit, ntree = 100)
+predict_a <- predict(rf_model_a, newdata = test_df) 
+
+cv_a[j] <- mean(predict_a == test_df$Cat_bleaching)
+
+  }
+
+cv_f_50 <- append(cv_f_50, mean(cv_f))
+cv_a_50 <- append(cv_a_50, mean(cv_a))
+
+}
+
+cat("Farhan's model mean CV accuracy:", round(mean(cv_f_50), 2), "\n")
+cat("Improved model's mean CV accuracy:", round(mean(cv_a_50), 2), "\n")
+
+#boxplots 
+boxplot(cv_f_50, cv_a_50, names = c("Farhan's Model", "Alternative Model"))
+title("Boxplots Comparing Average Cross Validation Performance")
+```
+
+@fig-boxplots compares the averaged cross validation distributions of the 2 models: The first model uses the 4 variables Farhan claims is most associated with average bleaching, while the second model comprises the top 4 variables in Spearman’s Correlation. I did not include categorical variables such as Ocean and Region, while there is some trend as proven from the box plots, the categorical variables can't be directly compared to the numerical variables because there is no common scale for both variables.
+
+@fig-boxplots shows the Farhan's Model having a median of 0.726, with an interquartile range of 0.723 to 0.727, with an outlier on the lower end. Whereas for the Alternative model, the interquartile range is higher at 0.731 to 0.735. Furthermore, the median is at 0.733, with no outliers. This implies that the 2nd model is more stable and consistent.
+
+The repeated 50 times 5 fold CV prevents random chances of good or bad performance, to compare model stability and average performance.
+
+```{r message = FALSE, warning = FALSE}
+#Rain forest model + confusion matrix
+
+set.seed(111) 
+
+train_model <- caret::createDataPartition(reef_model$Cat_bleaching, p = 0.7, list = FALSE) 
+
+train_data <- reef_model[train_model, ] 
+test_data <- reef_model[-train_model, ]
+
+rf_farhan <- randomForest( Cat_bleaching ~ Temperature_Mean + TSA_Frequency + Temperature_Kelvin_Standard_Deviation + TSA_DHW_Standard_Deviation, data = train_data, na.action = na.omit, importance = TRUE )
+
+rf_alternative <- randomForest(Cat_bleaching ~ TSA + Temperature_Kelvin + TSA_DHW + Latitude.Degrees, data = train_data, na.action = na.omit, importance = TRUE)
+    
+pred_farhan <- predict(rf_farhan, newdata = test_data)
+pred_alt <- predict(rf_alternative, newdata = test_data)
+
+ #confusion matrix  
+conf_m_farhan <- confusionMatrix(pred_farhan, test_data$Cat_bleaching, positive = "Present")
+  
+conf_m_alt <- confusionMatrix(pred_alt, test_data$Cat_bleaching, positive = "Present")
+
+data.frame(
+  Metrics = c("Accuracy", "Sensitivity", "Specificity", 
+             "Precision"),
+  Farhan_Model = round(c(
+    unname(conf_m_farhan$overall["Accuracy"]),
+    unname(conf_m_farhan$byClass["Sensitivity"]),
+    unname(conf_m_farhan$byClass["Specificity"]),
+    unname(conf_m_farhan$byClass["Pos Pred Value"])), 4),
+  
+  Alternative_Model = round(c(
+    unname(conf_m_alt$overall["Accuracy"]),
+    unname(conf_m_alt$byClass["Sensitivity"]),
+    unname(conf_m_alt$byClass["Specificity"]),
+    unname(conf_m_alt$byClass["Pos Pred Value"])), 4)
+  )%>%
+ 
+   kable(caption = "Confusion Matrix: Farhan's Model vs Alternative Model", col.names = c("Metrics", "Farhan's Model", "Alternative Model"))
+
+
+```
+
+This confusion matrix table shows that the Alternative Model performed better at accuracy. The second model also performs better at specificity (how well it classifies reefs that are not bleached) and precision (how well it classifies bleaching when present correctly). However, the first model performs better at sensitivity (how well it classifies true bleaching). From a marine scientist perspective predicting bleaching, sensitivity might be more important due to consequences of not correctly classifying bleaching which leads to coral bleaching undetected.
+
+```{r message = FALSE, warning = FALSE, fig-farhan, fig.cap = "Farhan's Predicted Outcome Map: Showing Correct and Incorrect Classifications of the Model"}
+#Predicted Outcome Map of Farhan's model
+
+test_data$pred_farhan <-pred_farhan
+test_data$pred_alt <-pred_alt
+
+test_data$agreement_farhan <- ifelse(test_data$Cat_bleaching == test_data$pred_farhan, "Correct", "Incorrect")
+test_data$agreement_alt <- ifelse(test_data$Cat_bleaching == test_data$pred_alt, "Correct", "Incorrect")
+
+pal<- colorFactor(c("green", "red"), levels = c("Correct", "Incorrect"))
+
+total_f_correct <- sum(test_data$agreement_farhan == "Correct")
+total_f_incorrect <- sum(test_data$agreement_farhan == "Incorrect")
+total_a_correct <- sum(test_data$agreement_alt == "Correct")
+total_a_incorrect <- sum(test_data$agreement_alt == "Incorrect")
+
+leaflet(test_data) %>%
+  addTiles() %>% 
+  addCircleMarkers(
+    lng = ~ Longitude.Degrees,
+    lat = ~ Latitude.Degrees,
+    color = ~ pal(agreement_farhan),
+    fillOpacity = 0.5,
+    radius = 8,
+    popup = ~paste("<b>Actual:</b>", Cat_bleaching, "<br>",
+      "<b>Predicted:</b>", pred_farhan, "<br>",
+      "<b>Outcome:</b>", agreement_farhan, "<br>",
+      "<hr>",
+      "<b>Total Correct:</b>",   total_f_correct, "<br>",
+      "<b>Total Incorrect:</b>", total_f_incorrect
+    )
+  ) %>%
+  
+addLegend(
+position = "bottomleft", 
+pal = pal,
+values = ~agreement_farhan,
+title = ("Figure 1: Predicted Outcome Map of Farhan's Model")
+)
+```
+
+From @fig-farhan, we can see that there are 1418 predicted correctly, while 564 were predicted incorrectly. The distribution seems to be random.
+
+```{r message = FALSE, warning = FALSE, fig-alt, fig.cap = "Alternative Model's Predicted Outcome Map: Showing Correct and Incorrect Classifications"}
+#Predicted Outcome Map of the Alternative Model 
+leaflet(test_data) %>%
+  addTiles() %>% 
+  addCircleMarkers(
+    lng = ~ Longitude.Degrees,
+    lat = ~ Latitude.Degrees,
+    color = ~ pal(agreement_alt),
+    fillOpacity = 0.5,
+    radius = 8,
+    popup = ~paste("<b>Actual:</b>", Cat_bleaching, "<br>",
+      "<b>Predicted:</b>", pred_alt, "<br>",
+      "<b>Outcome:</b>", agreement_alt, "<br>",
+      "<hr>",
+      "<b>Total Correct:</b>",   total_a_correct, "<br>",
+      "<b>Total Incorrect:</b>", total_a_incorrect
+    )
+  ) %>%
+  
+addLegend(
+position = "bottomleft", 
+pal = pal,
+values = ~agreement_alt,
+title = ("Figure 2: Predicted Outcome Map of Alternative Model")
+)
+```
+
+From @fig-alt, there is a higher accuracy. However, accuracy can be misleading in classification especially when classes are slightly imbalanced.
+
+```{r message = FALSE, warning = FALSE, fig-roc, fig.cap = "ROC Graph: Comparing the Model's ROC and AUC"}
+#ROC Curve Comparison
+
+prob_farhan <- predict(rf_farhan, newdata = test_data, type = "prob")[, "Present"]
+  
+  
+prob_alt <- predict(rf_alternative, newdata = test_data, type = "prob")[, "Present"]
+
+roc_farhan <- roc(test_data$Cat_bleaching, prob_farhan, levels = c("None", "Present"))
+
+roc_alt <- roc(test_data$Cat_bleaching, prob_alt, levels = c("None", "Present"))
+
+auc_farhan <- round(auc(roc_farhan), 4)
+  
+auc_alt <- round(auc(roc_alt), 4)
+
+roc_df_f <- data.frame(
+  FPR = 1 - roc_farhan$specificities,
+  TPR = roc_farhan$sensitivities,
+  Model = paste("Farhan's Model (AUC = ", auc_farhan, ")")
+)
+
+roc_df_a <- data.frame(
+  FPR = 1 - roc_alt$specificities,
+  TPR = roc_alt$sensitivities,
+  Model = paste("Alternative Model (AUC = ", auc_alt, ")")
+)
+
+roc_df <- rbind(roc_df_f, roc_df_a)
+
+ggplot(roc_df, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(lwd = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  scale_color_manual(values = c("cyan", "pink")) +
+  labs(title = "ROC Curve: Comparison between Farhan's Model & Alternative Model",
+       x = "False Positive Rate",
+       y = "True Positive Rate") +
+  theme_classic() +
+  theme(legend.position = "top")
+
+
+
+```
+
+The @fig-roc shows the independent evaluation of both models' performance across all thresholds. The Alternative Model performs in terms of AUC. The higher the AUC, the better the model performs. This contradicts the lower sensitivity results of the 2nd model, as it shows that the Alternative Model performs better on average across different thresholds.
+
+# References
+
+Navarro, D. (2022). Skew and kurtosis. In Learning statistics with SPSS: A tutorial for psychology students and other beginners. LibreTexts. https://stats.libretexts.org/Workbench/Learning_Statistics_with_SPSS\_-\_A_Tutorial_for_Psychology_Students_and_Other_Beginners/04%3A_Descriptive_Statistics/4.03%3A_Skew_and_Kurtosis
+
+García, S., Luengo, J., & Herrera, F. (2015). Data preprocessing in data mining. Springer. https://doi.org/10.1007/978-3-319-10247-4
+
+R, S, V. (2024). Your guide to missing values imputation. https://www.blog.trainindata.com/your-guide-to-missing-values-imputation/
